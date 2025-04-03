@@ -1,0 +1,7 @@
+edge-tts 
+pydub
+-U openai-whisper
+-q google-generativeai
+fastapi
+python-multipart
+gradio
