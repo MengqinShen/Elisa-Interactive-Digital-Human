@@ -1,76 +1,139 @@
-#git clone https://github.com/petewarden/openai-whisper-webapp
-from fastapi import FastAPI, File, UploadFile
+import os
+import tempfile
 import whisper
 import edge_tts
 import asyncio
-import os
-from fastapi.responses import FileResponse
 import google.generativeai as genai
 import gradio as gr
-import requests
+from scipy.io.wavfile import write
+import sounddevice as sd
+import subprocess
+import keyboard
+import time
+import pyaudio
 
-# Initialize FastAPI
-app = FastAPI()
+'''
+gemini
+ASR: openai-whisper
+TTS:edge-tts
+'''
 
-# Configure Gemini API
-GEMINI_API_KEY = "YOUR KEY"
+# ======= CONFIG =======
+GEMINI_API_KEY = "Your Key"  # <-- Put your key here
+VOICE = "en-US-AriaNeural"
+RECORD_SECONDS = 15
+SAMPLE_RATE = 16000
+# 设备初始化
+P = pyaudio.PyAudio()
+
 genai.configure(api_key=GEMINI_API_KEY)
-genai_model = genai.GenerativeModel("gemini-1.5-flash")
+whisper_model = whisper.load_model("tiny", device="cpu")
 
-# Load Whisper model (choose a smaller model for speed)
-asr_model = whisper.load_model("base")
-# Folder for saving temporary files
-os.makedirs("temp", exist_ok=True)
+def record_audio(duration=RECORD_SECONDS):
+    print("🎙️ Recording...")
+    audio = sd.rec(int(duration * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=1, dtype="int16")
+    sd.wait()
+    print("✅ Recording complete.")
+    return audio
 
-@app.post("/convert/")
-async def convert_speech_to_speech(file: UploadFile = File(...)):
-    # Save uploaded audio file
-    audio_path = f"temp/{file.filename}"
-    with open(audio_path, "wb") as f:
-        f.write(await file.read())
 
-    # Convert speech to text using Whisper
-    result = asr_model.transcribe(audio_path)
-    transcribed_text = result["text"]
+def save_wav(audio):
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
+    write(tmp.name, SAMPLE_RATE, audio)
+    return tmp.name
 
-    # Send text to Gemini and get response
-    response = genai.generate_text(genai_model, prompt=transcribed_text)
-    ai_response = response.text  # Extract text response
 
-    # Convert AI response to speech using edge-tts
-    tts_output = f"temp/output.mp3"
-    tts = edge_tts.Communicate(ai_response, "en-US-JennyNeural")
-    await tts.save(tts_output)
+def transcribe(audio_path):
+    result = whisper_model.transcribe(audio_path, fp16=False)
+    return result["text"]
 
-    # Return generated speech file
-    return FileResponse(tts_output, media_type="audio/mpeg", filename="response.mp3")
+def ask_gemini(prompt):
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    response = model.generate_content(prompt)
+    return response.text
 
-def process_audio(file):
-    response = requests.post("http://127.0.0.1:8000/convert/", files={"file": open(file, "rb")})
-    output_path = "response.mp3"  # Save response file locally
-    with open(output_path, "wb") as f:
-        f.write(response.content)
-    return output_path  # Return the file path
+async def speak_text(text):
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        mp3_path = tmp.name
 
-gr.Interface(
-    fn=process_audio,
-    inputs=gr.Audio(type="filepath"),
-    outputs=gr.Audio(type="filepath"),  # Fix: Use 'filepath' instead of 'file'
-    title="AI Voice Assistant"
-).launch()
-# def transcribe(audio):
-#     # load audio and pad/trim it to fit 30 seconds
-#     audio = whisper.load_audio(audio)
-#     audio = whisper.pad_or_trim(audio)
+    # Generate speech with edge-tts
+    communicate = edge_tts.Communicate(text=text, voice=VOICE)
+    await communicate.save(mp3_path)
+
+    # Play the generated audio
+    subprocess.run(["afplay", mp3_path])
+
+    # Optional: remove the file after playing
+    os.remove(mp3_path)
+
+# Main Loop
+async def main():
+    while True:
+        print("""
+        ===== Gemini Multi-Conversation =====
+        Space : start/stop
+        ESC  : quit
+        ======================
+        """)
+        audio = record_audio()
+        audio_path = save_wav(audio)
+        text = transcribe(audio_path)
+        # text = transcribe("./data/sun.wav")
+        os.remove(audio_path)
+
+        print(f"📝 You said: {text}")
+        reply = ask_gemini(text)
+        print(f"🤖 Gemini: {reply}")
+
+        await speak_text(reply)
+
+        # 键盘事件检测
+        if keyboard.is_pressed('space'):
+            # self.toggle_recording()
+            time.sleep(0.5)  # 防抖处理
+        elif keyboard.is_pressed('esc'):
+            P.terminate()
+            break
+
+        time.sleep(0.1)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
+# import pyaudio
+# import wave
 #
-#     # make log-Mel spectrogram and move to the same device as the model
-#     mel = whisper.log_mel_spectrogram(audio).to(model.device)
+# CHUNK = 1024
+# FORMAT = pyaudio.paInt16
+# CHANNELS = 1
+# RATE = 44100
+# RECORD_SECONDS = 5
+# OUTPUT_FILENAME = "output.wav"
 #
-#     # detect the spoken language
-#     _, probs = model.detect_language(mel)
-#     print(f"Detected language: {max(probs, key=probs.get)}")
+# p = pyaudio.PyAudio()
 #
-#     # decode the audio
-#     options = whisper.DecodingOptions()
-#     result = whisper.decode(model, mel, options)
-#     return result.text
+# stream = p.open(format=FORMAT,
+#                 channels=CHANNELS,
+#                 rate=RATE,
+#                 input=True,
+#                 frames_per_buffer=CHUNK)
+#
+# print("🎙️ Recording...")
+# frames = []
+# for _ in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
+#     data = stream.read(CHUNK)
+#     frames.append(data)
+#
+# print("✅ Done recording.")
+#
+# stream.stop_stream()
+# stream.close()
+# p.terminate()
+#
+# wf = wave.open(OUTPUT_FILENAME, 'wb')
+# wf.setnchannels(CHANNELS)
+# wf.setsampwidth(p.get_sample_size(FORMAT))
+# wf.setframerate(RATE)
+# wf.writeframes(b''.join(frames))
+# wf.close()
